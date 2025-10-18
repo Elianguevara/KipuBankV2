@@ -1,86 +1,127 @@
-# KipuBankV2
+# 🏦 KipuBankV2
 
-## 📌 Project Overview
+> Multi-token vault with ETH and ERC-20 support, access control, and global USD cap.
 
-KipuBankV2 is the evolution of the original KipuBank contract, refactored and extended to simulate a robust vault system ready for a production environment.
+## 📑 Table of Contents
 
-### Objectives and Implemented Improvements
+- [Overview](#-overview)
+- [Features](#-features)
+- [Architecture](#-architecture)
+- [Installation](#-installation)
+- [Usage](#-usage)
+- [Security](#-security)
 
-The main objective is to apply advanced Solidity, security, and architectural techniques to transform the base contract. The key improvements implemented, in line with the course objectives, are:
+## 📝 Overview
 
-- **Multi-token Support:** The contract was extended to accept deposits and withdrawals for both native ETH and multiple ERC-20 tokens.
-- **Access Control:** Implemented OpenZeppelin's `AccessControl` to manage roles (e.g., `ROLE_ADMIN`) that restrict critical administrative functions.
-- **Oracle Integration (Chainlink):** Utilizes Chainlink Data Feeds to fetch real-time prices and convert balances to an equivalent USD value.
-- **USD Accounting and Global Cap:** The contract maintains internal accounting in USD (with 6 decimals, USDC-style) and enforces a global deposit limit (`bankCapUsd`) based on this value.
-- **Security and Efficiency (Patterns):** Applied secure design patterns like Checks-Effects-Interactions (CEI), `SafeERC20` for transfers, and optimized gas usage (e.g., `unchecked`, custom errors).
+KipuBankV2 is a blockchain vault that enables:
 
----
+- ETH and ERC-20 token deposits/withdrawals
+- Automatic USD conversion using Chainlink
+- Role-based access control
+- Global deposit limit in USD
 
-## ✨ Design Decisions and Trade-offs
+## 🔥 Features
 
-- **Access Control (`AccessControl`):** `AccessControl` was chosen over a simple `Ownable` for its flexibility in adding new roles in the future.
-- **Internal Accounting:** Uses `address(0)` (the `NATIVE_TOKEN` constant) to represent ETH within the balance mappings, which is a standard convention.
-- **Custom Errors:** All `require()` statements were migrated to custom errors (e.g., `BankCapExceeded`, `InsufficientFunds`, `FeedNotSet`). This significantly reduces gas costs for deployment and for failed transactions.
-- **Decimal Conversion:** Implemented internal logic (`_amountTokenToUsd6`) to normalize all values. This function handles the varying decimals of ERC-20 tokens (e.g., 18, 8, 6) and Chainlink feed decimals (e.g., 8) to convert them to a single 6-decimal standard (`USD_DECIMALS`).
-- **CEI Pattern:** All withdrawal functions (`withdrawETH`, `withdrawERC20`) strictly follow the Checks-Effects-Interactions pattern. The state (balances) is updated _before_ the external transfer to prevent re-entrancy attacks.
+- **Multi-token**: Native support for ETH and ERC-20 tokens
+- **Oracle**: Chainlink integration for real-time pricing
+- **Roles**: Permission system with `AccessControl`
+- **Security**: CEI pattern, SafeERC20, and custom errors
+- **Gas**: Optimizations with `unchecked` and custom errors
 
----
+## 🏗 Architecture
 
-## 📂 Repository Structure
+```
+contracts/
+├── KipuBankV2.sol      # Main contract
+└── interfaces/
+    ├── IKipuBankV2.sol           # Public interface
+    └── IAggregatorV3Interface.sol # Chainlink interface
+```
 
-The repository follows the structure requested for the assignment deliverable:
+## 🚀 Installation
 
-KipuBankV2/ │ ├── src/ │ ├── KipuBankV2.sol # Main contract │ └── interfaces/ │ ├── IKipuBankV2.sol # Public interface │ └── IAggregatorV3Interface.sol # Chainlink interface │ ├── README.md # This documentation └── LICENSE # MIT License
+1. Clone the repository:
 
----
+```bash
+git clone https://github.com/your-username/kipubankv2.git
+cd kipubankv2
+```
 
-## ⚙️ Deployment and Interaction Instructions
+2. Install dependencies:
 
-### Requirements
+```bash
+npm install
+```
 
-- Solidity `^0.8.28`
-- Remix IDE or a local environment (Hardhat/Foundry)
-- MetaMask connected to a Testnet (e.g., Sepolia)
+## 💻 Usage
 
-### Deployment Steps (Remix IDE)
-
-1.  Open [Remix IDE](https://remix.ethereum.org).
-2.  Load the files from the `src/` folder into the file explorer.
-3.  Compile `KipuBankV2.sol` (version `0.8.28`).
-4.  In the "Deploy & Run" tab:
-    - Environment: **Injected Provider (MetaMask)**.
-    - Network: Sepolia Testnet.
-    - Constructor Parameters:
-      - `_admin`: Your wallet address.
-      - `_withdrawalThresholdWei`: Withdrawal limit in Wei (e.g., `1000000000000000000` for 1 ETH).
-      - `_bankCapUsd6`: Global cap in USD 6-decimals (e.g., `100000000000` for 100,000 USD).
-      - `_ethUsdFeed`: Chainlink ETH/USD feed address (Sepolia: `0x694AA1769357215DE4FAC081bf1f309aDC325306`).
-5.  Click **Deploy** and confirm in MetaMask.
-6.  Verify the contract on Etherscan.
-
-### Interaction Examples
-
-**1. Deposit ETH**
+### Deployment
 
 ```solidity
-// Send ETH (e.g., 0.1 ETH) along with the function call:
-depositETH() payable
-
-2. Deposit ERC-20 (e.g., a stablecoin)
-
-// 1. Approve the KipuBankV2 contract
-ERC20(token_address).approve(kipubank_address, amount)
-
-// 2. Call the deposit function
-depositERC20(token_address, amount)
-
-3. Register a new Token (Admin)
-
-// (Requires ROLE_ADMIN)
-// Example for registering a hypothetical "DAI" token
-registerToken(
-    "0xDAI_TOKEN_ADDRESS",
-    "0xDAI_USD_FEED_ADDRESS",
-    18 // Decimals of the DAI token
+constructor(
+    address _admin,                // Initial administrator
+    uint256 _withdrawalThresholdWei, // ETH withdrawal limit (e.g., 1 ETH = 1e18)
+    uint256 _bankCapUsd6,         // Global USD limit (6 decimals)
+    address _ethUsdFeed          // Chainlink ETH/USD feed
 )
 ```
+
+### Main Functions
+
+1. **ETH Deposits**
+
+```solidity
+// Send ETH with the call
+function depositETH() external payable;
+```
+
+2. **ERC-20 Deposits**
+
+```solidity
+// First approve spending
+IERC20(token).approve(kipubank, amount);
+// Then deposit
+function depositERC20(address token, uint256 amount) external;
+```
+
+3. **Withdrawals**
+
+```solidity
+function withdrawETH(uint256 amount) external;
+function withdrawERC20(address token, uint256 amount) external;
+```
+
+### Admin Functions
+
+```solidity
+// Register new token (requires ROLE_ADMIN)
+function registerToken(
+    address token,   // Token address
+    address feed,    // Chainlink price feed
+    uint8 decimals  // Token decimals
+) external;
+```
+
+## 🔒 Security Features
+
+- CEI pattern implementation
+- Reentrancy protection
+- SafeERC20 for secure transfers
+- Granular role control
+- Comprehensive testing suite
+- Custom error handling
+- Withdrawal limits
+- Global deposit cap
+
+## 🛠 Technical Specifications
+
+- Solidity Version: `^0.8.28`
+- OpenZeppelin Dependencies:
+  - AccessControl
+  - SafeERC20
+- Chainlink Price Feeds
+- Gas Optimizations
+
+## 📄 License
+
+MIT License - See [LICENSE](./LICENSE) for details.
