@@ -45,3 +45,54 @@ This project demonstrates how to **refactor, scale, and secure** a smart contrac
 
 ## 📂 Repository Structure
 
+KipuBankV2/
+│── contracts/
+│ ├── KipuBankV2.sol # Main smart contract
+│ └── interfaces/
+│ ├── IKipuBankV2.sol # Public interface for integration
+│ └── IAggregatorV3Interface.sol # Minimal Chainlink interface
+│
+│── README.md # Project documentation
+│── LICENSE # MIT License
+
+
+---
+
+## ⚙️ Deployment Instructions
+
+### 🔧 Requirements
+- Solidity `^0.8.28`
+- Remix IDE or Hardhat environment
+- MetaMask connected to a public testnet (Sepolia recommended)
+- Chainlink price feed addresses for ETH and ERC-20 tokens
+
+### 🚀 Steps (Remix IDE)
+
+1. Go to [Remix IDE](https://remix.ethereum.org).  
+2. Create a new workspace and add the `contracts/` folder.  
+3. Compile `KipuBankV2.sol` with Solidity version `0.8.28`.  
+4. In **Deploy & Run Transactions**:
+   - Select **Injected Provider (MetaMask)**.  
+   - Network: Sepolia Testnet.  
+   - Constructor parameters:
+     - `_admin`: Your wallet address.  
+     - `_withdrawalThresholdWei`: e.g. `1000000000000000000` (1 ETH).  
+     - `_bankCapUsd6`: e.g. `100000000000` (100,000 USDC in 6 decimals).  
+     - `_ethUsdFeed`: Chainlink ETH/USD feed (Sepolia: `0x694AA1769357215DE4FAC081bf1f309aDC325306`).  
+5. Click **Deploy** and confirm transaction in MetaMask.  
+6. Verify contract in [Etherscan](https://sepolia.etherscan.io/) by publishing the source code.  
+
+---
+
+## 🧪 Interaction Examples
+
+### Deposit ETH
+```solidity
+depositETH() payable
+
+Send ETH along with the transaction.
+
+Deposit ERC-20
+
+Approve allowance:
+ERC20.approve(KipuBankV2_address, amount)
