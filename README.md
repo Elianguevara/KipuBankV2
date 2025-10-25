@@ -1,133 +1,120 @@
-# KipuBankV2
+# 🏦 KipuBankV2
 
-## High-level Improvements
+## ✨ High-level Improvements
 
 KipuBankV2 is an evolution of the original **KipuBank** smart contract.  
 The improvements focus on **security**, **multi-token support**, **unified accounting**, and **gas efficiency**, making the contract closer to a production-ready design.
 
-- **Security**:
+### 🔒 Security
 
-  - Role-based access control with OpenZeppelin `AccessControl`.
-  - `Pausable` to stop all deposits/withdrawals in case of emergency.
-  - `ReentrancyGuard` to prevent reentrancy attacks.
-  - Custom errors instead of `require` strings for better gas efficiency.
+- Role-based access control with OpenZeppelin `AccessControl`.
+- `Pausable` to stop deposits/withdrawals in case of emergency.
+- `ReentrancyGuard` to prevent reentrancy attacks.
+- Custom errors instead of `require` strings (more gas efficient).
 
-- **Multi-token support**:
+### 💱 Multi-token Support
 
-  - ETH deposits are converted into USD-6 using Chainlink price feeds.
-  - USDC deposits are handled 1:1 with USD-6.
-  - Withdrawals can be executed in ETH or USDC.
+- ETH deposits converted into USD-6 using Chainlink price feeds.
+- USDC deposits handled 1:1 with USD-6.
+- Withdrawals in ETH or USDC.
 
-- **Unified accounting**:
+### 📊 Unified Accounting
 
-  - All balances are stored in USD-6 (6 decimals).
-  - Nested mapping `s_balances[user][token]` to track each user’s per-token balance.
-  - `address(0)` represents ETH, `address(USDC)` represents USDC.
+- Internal ledger in USD-6 (6 decimals).
+- Nested mapping `s_balances[user][token]`.
+- `address(0)` = ETH, `address(USDC)` = USDC.
 
-- **Oracle integration**:
+### 🔗 Oracle Integration
 
-  - Chainlink ETH/USD feed for fair conversion rates.
-  - Staleness and compromised data checks to ensure reliability.
+- Chainlink ETH/USD price feed.
+- Staleness & compromised data checks.
 
-- **Gas efficiency**:
-  - Single storage read + write operations where possible.
-  - `immutable` and `constant` variables to save gas.
-  - Strict **Checks-Effects-Interactions** pattern.
+### ⚡ Gas Efficiency
 
----
-
-## Deployment Instructions
-
-### Requirements
-
-- **Remix IDE** or Hardhat/Foundry environment.
-- **MetaMask** wallet connected to **Sepolia Testnet**.
-- Testnet ETH for gas (can be obtained from a [Sepolia faucet](https://sepoliafaucet.com/)).
-
-### Steps (Remix + MetaMask)
-
-1. Open **Remix IDE** at [https://remix.ethereum.org](https://remix.ethereum.org).
-2. Load the contract `KipuBankV2.sol` into your workspace.
-3. In the **Solidity Compiler** tab:
-   - Select compiler version **0.8.26**.
-   - Enable optimization with **200 runs**.
-   - Compile the contract.
-4. In the **Deploy & Run Transactions** tab:
-   - Environment: `Injected Provider - MetaMask`.
-   - Contract: `KipuBankV2`.
-   - Constructor arguments (example):
-     - `admin`: `YOUR_ADDRESS`
-     - `usdc`: `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238`
-     - `ethUsdFeed`: `0x694AA1769357215DE4FAC081bf1f309aDC325306`
-     - `bankCapUSD6`: `1000000000000` (1,000,000 USD-6 cap)
-     - `withdrawalThresholdUSD6`: `10000000000` (10,000 USD-6 threshold)
-   - Click **Deploy** and confirm the transaction in MetaMask.
-5. Once deployed, copy the contract address (shown in Remix console or MetaMask tx receipt).
-6. Verify the contract on **Sepolia Etherscan**:
-   - Compiler: `0.8.26`.
-   - Optimization: `200 runs`.
-   - Paste the source code.
-   - Paste ABI-encoded constructor arguments (generated in Remix console with `ethers.utils.defaultAbiCoder`).
-   - Submit for verification.
+- Reduced storage reads/writes.
+- Use of `immutable` and `constant`.
+- Strict **Checks-Effects-Interactions** pattern.
 
 ---
 
-## Interaction Instructions
+## 🚀 Deployment Instructions
 
-After verification, the contract can be interacted with directly on **Sepolia Etherscan**:  
-👉 [KipuBankV2 on Sepolia Etherscan](https://sepolia.etherscan.io/address/0x0Cbb2fA554128647EB82e41bfb60B70fCf2bDc27#code)
+### 📋 Requirements
 
-### Read-only Functions (no gas required)
+- **Remix IDE** or Hardhat/Foundry.
+- **MetaMask** connected to **Sepolia Testnet**.
+- Testnet ETH (from [Sepolia faucet](https://sepoliafaucet.com/)).
 
-- `getBalanceUSD6(user, token)` → Returns a user’s balance in USD-6.
-- `getTotalBalanceUSD6(user)` → Returns total balance across ETH + USDC.
-- `getETHPrice()` → Returns latest ETH/USD price and decimals.
-- `previewETHToUSD6(weiAmount)` → Simulates ETH → USD-6 conversion.
-- `previewUSD6ToETH(usd6Amount)` → Simulates USD-6 → ETH conversion.
+### 🛠️ Steps (Remix + MetaMask)
 
-### State-changing Functions (require MetaMask + Sepolia ETH)
+1. Open [Remix IDE](https://remix.ethereum.org).
+2. Load `KipuBankV2.sol` into workspace.
+3. Compile:
+   - Solidity version **0.8.26**
+   - Optimization **200 runs**
+4. Deploy:
+   - Env: **Injected Provider - MetaMask**
+   - Contract: `KipuBankV2`
+   - Constructor args (example):
+
+| Param                     | Value                                        |
+| ------------------------- | -------------------------------------------- |
+| `admin`                   | `0xYourAddress`                              |
+| `usdc`                    | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
+| `ethUsdFeed`              | `0x694AA1769357215DE4FAC081bf1f309aDC325306` |
+| `bankCapUSD6`             | `1000000000000` (1M USD-6)                   |
+| `withdrawalThresholdUSD6` | `10000000000` (10k USD-6)                    |
+
+5. Confirm in MetaMask.
+6. Verify contract on **Sepolia Etherscan**:
+   - Compiler: `0.8.26`, opt: 200 runs.
+   - Paste source code.
+   - Provide ABI-encoded constructor args.
+
+---
+
+## 🎮 Interaction Guide
+
+Once verified, interact via **Etherscan UI**:  
+👉 [Sepolia Etherscan Example](https://sepolia.etherscan.io)
+
+### 📖 Read-only (Free)
+
+- `getBalanceUSD6(user, token)` → User balance.
+- `getTotalBalanceUSD6(user)` → User total balance.
+- `getETHPrice()` → ETH/USD price.
+- `previewETHToUSD6(weiAmount)` → Simulate ETH → USD-6.
+- `previewUSD6ToETH(usd6Amount)` → Simulate USD-6 → ETH.
+
+### ✍️ State-changing (Gas required)
 
 1. **Deposit ETH**
 
-   - Go to `Write Contract` → `depositETH()`.
-   - Enter the amount of ETH in the "Value" field (e.g., `0.01`).
-   - Confirm the transaction in MetaMask.
-   - Your balance will be credited in USD-6 internally.
+   - `depositETH()` + enter ETH value.
 
 2. **Deposit USDC**
 
-   - Call `depositUSDC(uint256 amount)`.
-   - First approve USDC spending from your MetaMask (standard ERC-20 `approve`).
-   - Confirm the transaction.
+   - `approve` USDC first.
+   - Then call `depositUSDC(amount)`.
 
 3. **Withdraw ETH**
 
-   - Call `withdrawETH(uint256 usd6Amount)`.
-   - Example: `1000000` to withdraw ≈ 1 USD worth of ETH.
-   - Confirm in MetaMask, ETH will be sent to your wallet.
+   - `withdrawETH(usd6Amount)`.
 
 4. **Withdraw USDC**
 
-   - Call `withdrawUSDC(uint256 usd6Amount)`.
-   - Example: `5000000` to withdraw 5 USDC.
+   - `withdrawUSDC(usd6Amount)`.
 
-5. **Pause/Unpause** (Admin only)
-
-   - Call `pause()` to disable deposits/withdrawals.
-   - Call `unpause()` to re-enable.
-
-6. **Rescue funds** (Treasurer only)
-   - Call `rescue(address token, uint256 amount)` to recover ERC-20 or ETH mistakenly sent to the contract.
-   - `token = address(0)` for ETH.
+5. **Admin Controls**
+   - `pause()` / `unpause()` → Emergency stop.
+   - `rescue(token, amount)` → Recover extra funds.
 
 ---
 
-## Design Decisions and Trade-offs
+## 🧠 Design Decisions & Trade-offs
 
-- **Unified USD-6 ledger**: Simplifies multi-asset tracking but introduces dependency on Chainlink for ETH valuation.
-- **Role-based access**: More secure and flexible than a single-owner model, but requires careful role assignment.
-- **Chainlink oracle dependency**: Ensures accurate ETH/USD conversion, but introduces reliance on external infrastructure.
-- **Gas optimization vs readability**: Optimizations (unchecked arithmetic, minimal storage reads) reduce gas costs but slightly reduce code readability.
-- **Custom errors**: More efficient than `require` strings, but less descriptive for non-technical users reviewing transactions.
-
----
+- ✅ **Unified USD-6 ledger** → Simplifies multi-asset tracking, but depends on Chainlink.
+- ✅ **Role-based access** → Secure & modular, but requires proper setup.
+- ✅ **Chainlink oracle** → Reliable pricing, but external dependency.
+- ✅ **Gas optimization** → Cheaper execution, but slightly harder readability.
+- ✅ **Custom errors** → Gas-efficient, but less verbose for end-users.
