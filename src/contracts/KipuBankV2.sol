@@ -1,446 +1,493 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.28;
+pragma solidity ^0.8.26;
 
-// ─────────────────────────────────────────────────────────────────────────────
-//                          IMPORTS (OpenZeppelin)
-// ─────────────────────────────────────────────────────────────────────────────
+/*///////////////////////////
+            IMPORTS
+///////////////////////////*/
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
-import {IERC20}        from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import {SafeERC20}     from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IAggregatorV3Interface} from "./interfaces/IAggregatorV3Interface.sol";
+import {Pausable} from "@openzeppelin/contracts/security/Pausable.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 
 /**
  * @title KipuBankV2
- * @author Victor Elian Guevara
- * @notice Multi-token vault supporting ETH and ERC-20 with access control and global bank cap in USD (6 decimals).
- * @dev Implements CEI pattern, custom errors, AccessControl, Chainlink feeds, safe transfers and gas-optimized storage.
+ * @author Elian
+ * @notice Bank with unified accounting in USD-6. Supports ETH (via Chainlink) and USDC.
+ * @dev address(0) => ETH; USDC is taken 1:1 in 6 decimals. CEI + ReentrancyGuard + Pausable + Roles.
+ * 
+ * Architecture:
+ * - All balances are stored internally in USD-6 (6 decimals)
+ * - ETH deposits are converted to USD-6 using Chainlink price feed
+ * - USDC deposits are assumed 1:1 with USD-6
+ * - Withdrawals convert from USD-6 back to native token amounts
+ * 
+ * Security Features:
+ * - Checks-Effects-Interactions pattern
+ * - ReentrancyGuard on all state-changing functions
+ * - Role-based access control
+ * - Oracle staleness and validity checks
+ * - Pausable for emergency stops
  */
-contract KipuBankV2 is AccessControl {
+contract KipuBankV2 is AccessControl, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // 1. CONTROL DE ACCESO
-    // ═════════════════════════════════════════════════════════════════════════
+    /*///////////////////////////
+           TYPE DECLARATIONS
+    ///////////////////////////*/
+    /// @notice Role for pausing/unpausing the contract
+    bytes32 public constant PAUSER_ROLE    = keccak256("PAUSER_ROLE");
+    
+    /// @notice Role for treasury operations (rescue funds)
+    bytes32 public constant TREASURER_ROLE = keccak256("TREASURER_ROLE");
 
-    /// @notice Bank administrator role.
-    bytes32 public constant ROLE_ADMIN = keccak256("ROLE_ADMIN");
+    /*///////////////////////////
+        CONSTANTS / IMMUTABLES
+    ///////////////////////////*/
+    /// @notice Maximum accepted heartbeat for price (staleness check)
+    uint32  public constant ORACLE_HEARTBEAT = 3600; // 1 hour
+    
+    /// @notice Internal ledger decimals (USD-6)
+    uint8   public constant USD_DECIMALS = 6;
+    
+    /// @notice Unit 1 USD-6
+    uint256 private constant ONE_USD6 = 10 ** USD_DECIMALS;
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // 2. DECLARACIONES DE TIPOS (Custom Errors & Events)
-    // ═════════════════════════════════════════════════════════════════════════
+    /// @notice USDC token (6 decimals) - immutable after deployment
+    IERC20 public immutable USDC;
+    
+    /// @notice ETH/USD price feed - immutable after deployment
+    AggregatorV3Interface public immutable ETH_USD_FEED;
+    
+    /// @notice Decimals of the Chainlink price feed - cached for gas optimization
+    uint8 public immutable FEED_DECIMALS;
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Custom Errors
-    // ─────────────────────────────────────────────────────────────────────────
+    /// @notice Maximum withdrawal threshold per transaction in USD-6
+    uint256 public immutable WITHDRAWAL_THRESHOLD_USD6;
 
-    error ZeroAmount();
-    error ZeroAddress();
-    error BankCapExceeded(uint256 availableUsd6);
-    error InsufficientFunds(uint256 balanceToken);
-    error WithdrawalThresholdExceeded(uint256 thresholdWei);
-    error TransferFailed(bytes reason);
-    error FeedNotSet(address token);
-    error InvalidPrice();
-    error DecimalsNotSet(address token);
-    error Unauthorized();
+    /// @notice Contract version
+    string public constant VERSION = "2.0.0";
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Events
-    // ─────────────────────────────────────────────────────────────────────────
+    /*///////////////////////////
+               STATE
+    ///////////////////////////*/
+    /// @notice Ledger: balance per user and per "logical token" (always USD-6)
+    /// @dev token = address(0) => ETH; token = address(USDC) => USDC
+    mapping(address user => mapping(address token => uint256 usd6)) private s_balances;
 
-    event Deposit(address indexed token, address indexed user, uint256 amountToken, uint256 amountUsd6);
-    event Withdrawal(address indexed token, address indexed user, uint256 amountToken, uint256 amountUsd6);
-    event PriceFeedUpdated(address indexed token, address indexed feed);
-    event TokenRegistered(address indexed token, uint8 decimals, address indexed feed);
+    /// @notice Total bank balance in USD-6 (sum of all balances)
+    uint256 public s_totalUSD6;
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // 3. INSTANCIA DEL ORÁCULO CHAINLINK (Price Feed Registry)
-    // ═════════════════════════════════════════════════════════════════════════
+    /// @notice Global bank capacity limit (USD-6)
+    uint256 public s_bankCapUSD6;
 
-    /// @notice Price feed registry mapping token address to Chainlink aggregator.
-    mapping(address => IAggregatorV3Interface) private priceFeeds;
+    /// @notice Counter for deposits (observability)
+    uint256 public s_depositCount;
+    
+    /// @notice Counter for withdrawals (observability)
+    uint256 public s_withdrawCount;
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // 4. VARIABLES CONSTANT & IMMUTABLE
-    // ═════════════════════════════════════════════════════════════════════════
-
-    /// @notice Virtual address used to represent ETH deposits.
-    address public constant NATIVE_TOKEN = address(0);
-
-    /// @notice Target decimals for USD accounting (USDC-style).
-    uint8 public constant USD_DECIMALS = 6;
-
-    /// @notice Per-transaction withdrawal threshold for ETH (wei).
-    uint256 public immutable withdrawalThresholdNative;
-
-    /// @notice Global capacity limit expressed in USD-6.
-    uint256 public immutable bankCapUsd;
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // 5. MAPPINGS (Estado del contrato)
-    // ═════════════════════════════════════════════════════════════════════════
-
-    /// @notice Global accounting of locked value (USD-6).
-    uint256 public totalUsdLocked;
-
-    /// @notice Total number of deposits made.
-    uint256 public depositCount;
-
-    /// @notice Total number of withdrawals made.
-    uint256 public withdrawalCount;
-
-    /// @notice Balances[token][user] → amount in token units.
-    mapping(address => mapping(address => uint256)) private balances;
-
-    /// @notice Registered decimals for ERC-20 tokens (ETH = assumed 18).
-    mapping(address => uint8) private tokenDecimals;
-
-    // ═════════════════════════════════════════════════════════════════════════
-    // 6. CONSTRUCTOR
-    // ═════════════════════════════════════════════════════════════════════════
+    /*///////////////////////////
+              EVENTS
+    ///////////////////////////*/
+    /**
+     * @notice Emitted when a user deposits tokens
+     * @param user Address of the depositor
+     * @param token Token address (address(0) for ETH)
+     * @param amountToken Amount in native token (ETH-wei or USDC-6)
+     * @param creditedUSD6 Amount credited in USD-6
+     */
+    event KBV2_Deposit(
+        address indexed user,
+        address indexed token,
+        uint256 amountToken,
+        uint256 creditedUSD6
+    );
 
     /**
-     * @notice Initializes the KipuBankV2 contract.
-     * @param _admin Address to be granted admin role.
-     * @param _withdrawalThresholdWei Maximum amount of ETH that can be withdrawn per transaction.
-     * @param _bankCapUsd6 Maximum total USD value (6 decimals) the bank can hold.
-     * @param _ethUsdFeed Chainlink price feed address for ETH/USD.
+     * @notice Emitted when a user withdraws tokens
+     * @param user Address of the withdrawer
+     * @param token Token address (address(0) for ETH)
+     * @param debitedUSD6 Amount debited from ledger in USD-6
+     * @param amountTokenSent Amount sent in native token (ETH-wei or USDC-6)
+     */
+    event KBV2_Withdrawal(
+        address indexed user,
+        address indexed token,
+        uint256 debitedUSD6,
+        uint256 amountTokenSent
+    );
+
+    /**
+     * @notice Emitted when bank capacity is updated
+     * @param newCapUSD6 New capacity limit in USD-6
+     */
+    event KBV2_BankCapUpdated(uint256 newCapUSD6);
+
+    /*///////////////////////////
+               ERRORS
+    ///////////////////////////*/
+    /// @notice Thrown when amount is zero
+    error KBV2_ZeroAmount();
+    
+    /// @notice Thrown when bank capacity would be exceeded
+    error KBV2_CapExceeded();
+    
+    /// @notice Thrown when user has insufficient balance
+    error KBV2_InsufficientBalance();
+    
+    /// @notice Thrown when oracle data is compromised
+    error KBV2_OracleCompromised();
+    
+    /// @notice Thrown when oracle price is stale
+    error KBV2_StalePrice();
+    
+    /// @notice Thrown when withdrawal exceeds per-transaction limit
+    error KBV2_WithdrawalLimitExceeded();
+    
+    /// @notice Thrown when ETH transfer fails
+    error KBV2_ETHTransferFailed();
+    
+    /// @notice Thrown when constructor parameters are invalid
+    error KBV2_InvalidParameters();
+    
+    /// @notice Thrown when user tries to send ETH via receive()
+    error KBV2_UseDepositETH();
+
+    /*///////////////////////////
+             CONSTRUCTOR
+    ///////////////////////////*/
+    /**
+     * @notice Initializes the KipuBankV2 contract
+     * @param admin Initial EOA with DEFAULT_ADMIN_ROLE/PAUSER/TREASURER
+     * @param usdc USDC token address (6 decimals) on testnet
+     * @param ethUsdFeed Chainlink Aggregator ETH/USD address
+     * @param bankCapUSD6 Global bank capacity (USD-6)
+     * @param withdrawalThresholdUSD6 Per-transaction withdrawal limit (USD-6)
      */
     constructor(
-        address _admin,
-        uint256 _withdrawalThresholdWei,
-        uint256 _bankCapUsd6,
-        address _ethUsdFeed
+        address admin,
+        address usdc,
+        address ethUsdFeed,
+        uint256 bankCapUSD6,
+        uint256 withdrawalThresholdUSD6
     ) {
-        if (_admin == address(0)) revert ZeroAddress();
-        if (_ethUsdFeed == address(0)) revert ZeroAddress();
-        if (_bankCapUsd6 == 0) revert ZeroAmount();
+        // Validate addresses
+        if (admin == address(0) || usdc == address(0) || ethUsdFeed == address(0)) {
+            revert KBV2_InvalidParameters();
+        }
+        
+        // Validate capacity parameters
+        if (bankCapUSD6 == 0 || withdrawalThresholdUSD6 == 0 || withdrawalThresholdUSD6 > bankCapUSD6) {
+            revert KBV2_InvalidParameters();
+        }
+        
+        // Grant roles
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(PAUSER_ROLE, admin);
+        _grantRole(TREASURER_ROLE, admin);
 
-        _grantRole(DEFAULT_ADMIN_ROLE, _admin);
-        _grantRole(ROLE_ADMIN, _admin);
-
-        withdrawalThresholdNative = _withdrawalThresholdWei;
-        bankCapUsd = _bankCapUsd6;
-
-        // Register ETH feed
-        priceFeeds[NATIVE_TOKEN] = IAggregatorV3Interface(_ethUsdFeed);
-        emit PriceFeedUpdated(NATIVE_TOKEN, _ethUsdFeed);
+        // Set immutable variables
+        USDC = IERC20(usdc);
+        ETH_USD_FEED = AggregatorV3Interface(ethUsdFeed);
+        FEED_DECIMALS = ETH_USD_FEED.decimals();
+        s_bankCapUSD6 = bankCapUSD6;
+        WITHDRAWAL_THRESHOLD_USD6 = withdrawalThresholdUSD6;
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // 7. MODIFIERS
-    // ═════════════════════════════════════════════════════════════════════════
-
+    /*///////////////////////////
+             MODIFIERS
+    ///////////////////////////*/
     /**
-     * @notice Restricts function access to bank administrators.
+     * @notice Ensures amount is not zero
+     * @param amount Amount to validate
      */
-    modifier onlyBankAdmin() {
-        if (!hasRole(ROLE_ADMIN, msg.sender)) revert Unauthorized();
+    modifier nonZero(uint256 amount) {
+        if (amount == 0) revert KBV2_ZeroAmount();
         _;
     }
 
     /**
-     * @notice Validates that the amount is greater than zero.
-     * @param _amount Amount to validate.
+     * @notice Enforces bank capacity limit
+     * @param newTotalUSD6 New total after operation
      */
-    modifier validAmount(uint256 _amount) {
-        if (_amount == 0) revert ZeroAmount();
+    modifier enforceCap(uint256 newTotalUSD6) {
+        if (newTotalUSD6 > s_bankCapUSD6) revert KBV2_CapExceeded();
         _;
     }
 
     /**
-     * @notice Validates that ETH withdrawal is within the allowed threshold.
-     * @param _amount Amount of ETH to withdraw.
+     * @notice Validates withdrawal amount and user balance
+     * @param user User address
+     * @param token Token address
+     * @param usd6Amount Amount in USD-6 to withdraw
      */
-    modifier withinThreshold(uint256 _amount) {
-        if (_amount > withdrawalThresholdNative) {
-            revert WithdrawalThresholdExceeded(withdrawalThresholdNative);
-        }
+    modifier validWithdraw(address user, address token, uint256 usd6Amount) {
+        if (usd6Amount == 0) revert KBV2_ZeroAmount();
+        if (usd6Amount > WITHDRAWAL_THRESHOLD_USD6) revert KBV2_WithdrawalLimitExceeded();
+        
+        uint256 bal = s_balances[user][token];
+        if (usd6Amount > bal) revert KBV2_InsufficientBalance();
         _;
     }
 
-    // ═════════════════════════════════════════════════════════════════════════
-    // 8. FUNCIONES
-    // ═════════════════════════════════════════════════════════════════════════
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Admin Functions
-    // ─────────────────────────────────────────────────────────────────────────
-
+    /*///////////////////////////
+             DEPOSITS
+    ///////////////////////////*/
     /**
-     * @notice Registers a new ERC-20 token with its price feed and decimals.
-     * @dev Only callable by ROLE_ADMIN. Required before users can deposit/withdraw the token.
-     * @param _token Address of the ERC-20 token to register.
-     * @param _feed Chainlink price feed address for this token.
-     * @param _decimals Number of decimals the token uses.
+     * @notice Deposits ETH and credits equivalent USD-6 to user's balance
+     * @dev Converts ETH to USD-6 using Chainlink oracle
+     * @dev msg.value Amount of ETH to deposit (in wei)
      */
-    function registerToken(address _token, address _feed, uint8 _decimals) external onlyBankAdmin {
-        if (_token == address(0)) revert ZeroAddress();
-        if (_feed == address(0)) revert ZeroAddress();
-        
-        tokenDecimals[_token] = _decimals;
-        priceFeeds[_token] = IAggregatorV3Interface(_feed);
-        
-        emit TokenRegistered(_token, _decimals, _feed);
-    }
-
-    /**
-     * @notice Updates the Chainlink price feed for ETH.
-     * @dev Only callable by ROLE_ADMIN.
-     * @param _feed New Chainlink price feed address for ETH/USD.
-     */
-    function updateEthFeed(address _feed) external onlyBankAdmin {
-        if (_feed == address(0)) revert ZeroAddress();
-        
-        priceFeeds[NATIVE_TOKEN] = IAggregatorV3Interface(_feed);
-        emit PriceFeedUpdated(NATIVE_TOKEN, _feed);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Deposit Functions
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Deposits ETH into the bank.
-     * @dev Converts ETH to USD-6 and checks against bank capacity.
-     */
-    function depositETH() external payable validAmount(msg.value) {
-        // Calcular USD antes de modificar estado
-        uint256 usd6 = _amountTokenToUsd6(NATIVE_TOKEN, msg.value);
-        
-        // 1 SOLO acceso de lectura a totalUsdLocked
-        uint256 currentTotal = totalUsdLocked;
-        uint256 newTotal = currentTotal + usd6;
-        
-        // Verificar capacidad UNA VEZ
-        if (newTotal > bankCapUsd) {
-            revert BankCapExceeded(bankCapUsd - currentTotal);
-        }
-
-        // 1 SOLO acceso de lectura a balance del usuario
-        uint256 userBalance = balances[NATIVE_TOKEN][msg.sender];
-        
-        // Ya verificamos que no hay overflow en newTotal vs bankCapUsd
-        // Por lo tanto userBalance + msg.value tampoco puede overflow
-        unchecked {
-            userBalance += msg.value;
-        }
-
-        // CEI: Effects - 2 escrituras a storage
-        balances[NATIVE_TOKEN][msg.sender] = userBalance;
-        totalUsdLocked = newTotal;
-        
-        unchecked {
-            depositCount++;
-        }
-
-        emit Deposit(NATIVE_TOKEN, msg.sender, msg.value, usd6);
-    }
-
-    /**
-     * @notice Deposits ERC-20 tokens into the bank.
-     * @param _token Address of the ERC-20 token to deposit.
-     * @param _amount Amount of tokens to deposit (in token's native decimals).
-     */
-    function depositERC20(address _token, uint256 _amount) external validAmount(_amount) {
-        // Validaciones de configuración
-        if (address(priceFeeds[_token]) == address(0)) revert FeedNotSet(_token);
-        if (tokenDecimals[_token] == 0) revert DecimalsNotSet(_token);
-
-        // Calcular USD antes de modificar estado
-        uint256 usd6 = _amountTokenToUsd6(_token, _amount);
-        
-        // 1 SOLO acceso de lectura a totalUsdLocked
-        uint256 currentTotal = totalUsdLocked;
-        uint256 newTotal = currentTotal + usd6;
-        
-        // Verificar capacidad UNA VEZ
-        if (newTotal > bankCapUsd) {
-            revert BankCapExceeded(bankCapUsd - currentTotal);
-        }
-
-        // 1 SOLO acceso de lectura a balance del usuario
-        uint256 userBalance = balances[_token][msg.sender];
-        
-        unchecked {
-            userBalance += _amount;
-        }
-
-        // CEI: Effects - 2 escrituras a storage
-        balances[_token][msg.sender] = userBalance;
-        totalUsdLocked = newTotal;
-        
-        unchecked {
-            depositCount++;
-        }
-
-        // CEI: Interaction - transferencia al final
-        IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
-
-        emit Deposit(_token, msg.sender, _amount, usd6);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // Withdrawal Functions
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Withdraws ETH from the bank.
-     * @param _amount Amount of ETH to withdraw (in wei).
-     */
-    function withdrawETH(uint256 _amount) 
-        external 
-        validAmount(_amount)
-        withinThreshold(_amount)
+    function depositETH()
+        external
+        payable
+        whenNotPaused
+        nonReentrant
+        nonZero(msg.value)
+        enforceCap(s_totalUSD6 + _ethWeiToUSD6(msg.value))
     {
-        // 1 SOLO acceso de lectura a balance del usuario
-        uint256 userBalance = balances[NATIVE_TOKEN][msg.sender];
-        
-        // Verificar fondos UNA VEZ (esto previene underflow)
-        if (_amount > userBalance) {
-            revert InsufficientFunds(userBalance);
-        }
-        
-        // Calcular USD antes de modificar estado
-        uint256 usd6 = _amountTokenToUsd6(NATIVE_TOKEN, _amount);
-        
-        // Ahora podemos usar unchecked porque YA verificamos
-        unchecked {
-            userBalance -= _amount;
-        }
-        
-        // 1 SOLO acceso de lectura a totalUsdLocked
-        uint256 currentTotal = totalUsdLocked;
-        
-        unchecked {
-            currentTotal -= usd6; // safe porque usd6 se calculó desde _amount que está en userBalance
-        }
-        
-        // CEI: Effects - 2 escrituras a storage
-        balances[NATIVE_TOKEN][msg.sender] = userBalance;
-        totalUsdLocked = currentTotal;
-        
-        unchecked {
-            withdrawalCount++;
-        }
-        
-        // CEI: Interaction - transferencia al final
-        (bool ok, bytes memory data) = msg.sender.call{value: _amount}("");
-        if (!ok) revert TransferFailed(data);
+        // Calculate USD-6 equivalent
+        uint256 usd6 = _ethWeiToUSD6(msg.value);
 
-        emit Withdrawal(NATIVE_TOKEN, msg.sender, _amount, usd6);
+        // Effects (single storage write)
+        unchecked {
+            s_balances[msg.sender][address(0)] += usd6;
+            s_totalUSD6 += usd6;
+            s_depositCount++;
+        }
+
+        emit KBV2_Deposit(msg.sender, address(0), msg.value, usd6);
     }
 
     /**
-     * @notice Withdraws ERC-20 tokens from the bank.
-     * @param _token Address of the ERC-20 token to withdraw.
-     * @param _amount Amount of tokens to withdraw (in token's native decimals).
+     * @notice Deposits USDC and credits equivalent USD-6 to user's balance
+     * @dev Assumes USDC has 6 decimals (1:1 conversion with USD-6)
+     * @param amountUSDC Amount of USDC to deposit (6 decimals)
      */
-    function withdrawERC20(address _token, uint256 _amount) external validAmount(_amount) {
-        // Validaciones de configuración
-        if (address(priceFeeds[_token]) == address(0)) revert FeedNotSet(_token);
-        if (tokenDecimals[_token] == 0) revert DecimalsNotSet(_token);
-
-        // 1 SOLO acceso de lectura a balance del usuario
-        uint256 userBalance = balances[_token][msg.sender];
-        
-        // Verificar fondos UNA VEZ
-        if (_amount > userBalance) {
-            revert InsufficientFunds(userBalance);
-        }
-        
-        // Calcular USD antes de modificar estado
-        uint256 usd6 = _amountTokenToUsd6(_token, _amount);
-        
-        // Ahora podemos usar unchecked
+    function depositUSDC(uint256 amountUSDC)
+        external
+        whenNotPaused
+        nonReentrant
+        nonZero(amountUSDC)
+        enforceCap(s_totalUSD6 + amountUSDC)
+    {
+        // Effects first (CEI pattern)
         unchecked {
-            userBalance -= _amount;
+            s_balances[msg.sender][address(USDC)] += amountUSDC;
+            s_totalUSD6 += amountUSDC;
+            s_depositCount++;
         }
-        
-        // 1 SOLO acceso de lectura a totalUsdLocked
-        uint256 currentTotal = totalUsdLocked;
-        
+
+        // Interaction
+        USDC.safeTransferFrom(msg.sender, address(this), amountUSDC);
+
+        emit KBV2_Deposit(msg.sender, address(USDC), amountUSDC, amountUSDC);
+    }
+
+    /*///////////////////////////
+              WITHDRAWALS
+    ///////////////////////////*/
+    /**
+     * @notice Withdraws ETH by debiting USD-6 from user's balance
+     * @dev Converts USD-6 to ETH using Chainlink oracle
+     * @param usd6Amount Amount in USD-6 to withdraw
+     */
+    function withdrawETH(uint256 usd6Amount)
+        external
+        whenNotPaused
+        nonReentrant
+        validWithdraw(msg.sender, address(0), usd6Amount)
+    {
+        // Effects (single read + single write)
         unchecked {
-            currentTotal -= usd6;
+            s_balances[msg.sender][address(0)] -= usd6Amount;
+            s_totalUSD6 -= usd6Amount;
+            s_withdrawCount++;
         }
-        
-        // CEI: Effects - 2 escrituras a storage
-        balances[_token][msg.sender] = userBalance;
-        totalUsdLocked = currentTotal;
-        
+
+        // Convert and send (interaction)
+        uint256 weiAmount = _usd6ToEthWei(usd6Amount);
+        (bool ok, ) = payable(msg.sender).call{value: weiAmount}("");
+        if (!ok) revert KBV2_ETHTransferFailed();
+
+        emit KBV2_Withdrawal(msg.sender, address(0), usd6Amount, weiAmount);
+    }
+
+    /**
+     * @notice Withdraws USDC by debiting USD-6 from user's balance
+     * @dev 1:1 conversion between USD-6 and USDC
+     * @param usd6Amount Amount in USD-6 to withdraw
+     */
+    function withdrawUSDC(uint256 usd6Amount)
+        external
+        whenNotPaused
+        nonReentrant
+        validWithdraw(msg.sender, address(USDC), usd6Amount)
+    {
+        // Effects (single read + single write)
         unchecked {
-            withdrawalCount++;
+            s_balances[msg.sender][address(USDC)] -= usd6Amount;
+            s_totalUSD6 -= usd6Amount;
+            s_withdrawCount++;
         }
 
-        // CEI: Interaction - transferencia al final
-        IERC20(_token).safeTransfer(msg.sender, _amount);
+        // Send USDC 1:1
+        USDC.safeTransfer(msg.sender, usd6Amount);
 
-        emit Withdrawal(_token, msg.sender, _amount, usd6);
+        emit KBV2_Withdrawal(msg.sender, address(USDC), usd6Amount, usd6Amount);
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // View Functions
-    // ─────────────────────────────────────────────────────────────────────────
-
+    /*///////////////////////////
+           ADMINISTRATION
+    ///////////////////////////*/
     /**
-     * @notice Returns the balance of a specific token for a user.
-     * @param _token Address of the token (use address(0) for ETH).
-     * @param _user Address of the user.
-     * @return The balance in token's native units.
+     * @notice Updates the global bank capacity
+     * @param newCap New capacity in USD-6
      */
-    function getBalance(address _token, address _user) external view returns (uint256) {
-        return balances[_token][_user];
-    }
-
-    /**
-     * @notice Returns the Chainlink price feed address for a token.
-     * @param _token Address of the token.
-     * @return Address of the price feed.
-     */
-    function getFeed(address _token) external view returns (address) {
-        return address(priceFeeds[_token]);
+    function setBankCapUSD6(uint256 newCap)
+        external
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        if (newCap == 0) revert KBV2_InvalidParameters();
+        s_bankCapUSD6 = newCap;
+        emit KBV2_BankCapUpdated(newCap);
     }
 
     /**
-     * @notice Returns the registered decimals for a token.
-     * @param _token Address of the token.
-     * @return Number of decimals.
+     * @notice Pauses all deposits and withdrawals
      */
-    function getTokenDecimals(address _token) external view returns (uint8) {
-        return tokenDecimals[_token];
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Internal Helper Functions
-    // ─────────────────────────────────────────────────────────────────────────
+    /**
+     * @notice Unpauses all deposits and withdrawals
+     */
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
+    }
 
     /**
-     * @notice Converts a token amount to USD with 6 decimals using Chainlink price feeds.
-     * @dev Handles different token decimals and feed decimals to normalize to USD-6.
-     * @param _token Address of the token (address(0) for ETH).
-     * @param _amount Amount in token's native decimals.
-     * @return usd6 The equivalent value in USD with 6 decimals.
+     * @notice Rescues tokens/ETH sent to contract by mistake
+     * @dev Does not touch user balances, only excess funds
+     * @param token Token address (address(0) for ETH)
+     * @param amount Amount to rescue
      */
-    function _amountTokenToUsd6(address _token, uint256 _amount) private view returns (uint256 usd6) {
-        IAggregatorV3Interface feed = priceFeeds[_token];
-        if (address(feed) == address(0)) revert FeedNotSet(_token);
-
-        (, int256 price, , , ) = feed.latestRoundData();
-        if (price <= 0) revert InvalidPrice();
-
-        uint8 feedDecimals = feed.decimals();
-        uint8 tknDec = _token == NATIVE_TOKEN ? 18 : tokenDecimals[_token];
-        
-        if (_token != NATIVE_TOKEN && tknDec == 0) revert DecimalsNotSet(_token);
-
-        // Formula: usd6 = (_amount * price) / (10^(tknDec + feedDecimals - USD_DECIMALS))
-        uint256 num = _amount * uint256(price);
-        uint256 denomExp = uint256(tknDec) + uint256(feedDecimals);
-
-        if (denomExp >= USD_DECIMALS) {
-            usd6 = num / (10 ** (denomExp - USD_DECIMALS));
+    function rescue(address token, uint256 amount)
+        external
+        onlyRole(TREASURER_ROLE)
+    {
+        if (token == address(0)) {
+            (bool ok, ) = payable(msg.sender).call{value: amount}("");
+            if (!ok) revert KBV2_ETHTransferFailed();
         } else {
-            usd6 = num * (10 ** (USD_DECIMALS - denomExp));
+            IERC20(token).safeTransfer(msg.sender, amount);
         }
+    }
+
+    /*///////////////////////////
+           VIEW FUNCTIONS
+    ///////////////////////////*/
+    /**
+     * @notice Gets user's balance for a specific token in USD-6
+     * @param user User address
+     * @param token Token address (address(0) for ETH)
+     * @return Balance in USD-6
+     */
+    function getBalanceUSD6(address user, address token) external view returns (uint256) {
+        return s_balances[user][token];
+    }
+
+    /**
+     * @notice Gets user's total balance across all tokens in USD-6
+     * @param user User address
+     * @return Total balance in USD-6
+     */
+    function getTotalBalanceUSD6(address user) external view returns (uint256) {
+        return s_balances[user][address(0)] + s_balances[user][address(USDC)];
+    }
+
+    /**
+     * @notice Gets current ETH price in USD with decimals
+     * @return price Current ETH/USD price
+     * @return decimals Number of decimals in the price
+     */
+    function getETHPrice() external view returns (uint256 price, uint8 decimals) {
+        return _validatedEthUsdPrice();
+    }
+
+    /**
+     * @notice Previews how much ETH (wei) would be received for a USD-6 amount
+     * @param usd6Amount Amount in USD-6
+     * @return weiAmount Equivalent amount in wei
+     */
+    function previewUSD6ToETH(uint256 usd6Amount) external view returns (uint256 weiAmount) {
+        return _usd6ToEthWei(usd6Amount);
+    }
+
+    /**
+     * @notice Previews how much USD-6 would be credited for an ETH amount
+     * @param weiAmount Amount in wei
+     * @return usd6Amount Equivalent amount in USD-6
+     */
+    function previewETHToUSD6(uint256 weiAmount) external view returns (uint256 usd6Amount) {
+        return _ethWeiToUSD6(weiAmount);
+    }
+
+    /*///////////////////////////
+        INTERNAL UTILITIES
+    ///////////////////////////*/
+    /**
+     * @notice Validates oracle data and returns price with decimals
+     * @dev Checks for stale data and compromised rounds
+     * @return price ETH/USD price
+     * @return pDec Number of decimals in the price
+     */
+    function _validatedEthUsdPrice() internal view returns (uint256 price, uint8 pDec) {
+        (uint80 rid, int256 p, , uint256 updatedAt, uint80 ansInRound) = ETH_USD_FEED.latestRoundData();
+        
+        // Validate price and round
+        if (p <= 0 || ansInRound < rid) revert KBV2_OracleCompromised();
+        
+        // Check staleness
+        if (block.timestamp - updatedAt > ORACLE_HEARTBEAT) revert KBV2_StalePrice();
+        
+        pDec = FEED_DECIMALS;
+        price = uint256(p);
+    }
+
+    /**
+     * @notice Converts ETH (wei) to USD-6
+     * @dev Formula: USD-6 = wei * price / 10^(pDec + 12)
+     * @param weiAmount Amount in wei
+     * @return USD-6 amount
+     */
+    function _ethWeiToUSD6(uint256 weiAmount) internal view returns (uint256) {
+        (uint256 price, uint8 pDec) = _validatedEthUsdPrice();
+        return (weiAmount * price) / (10 ** (uint256(pDec) + 12));
+    }
+
+    /**
+     * @notice Converts USD-6 to ETH (wei)
+     * @dev Formula: wei = USD-6 * 10^(pDec + 12) / price
+     * @param usd6Amount Amount in USD-6
+     * @return wei amount
+     */
+    function _usd6ToEthWei(uint256 usd6Amount) internal view returns (uint256) {
+        (uint256 price, uint8 pDec) = _validatedEthUsdPrice();
+        return (usd6Amount * (10 ** (uint256(pDec) + 12))) / price;
+    }
+
+    /*///////////////////////////
+              RECEIVE
+    ///////////////////////////*/
+    /**
+     * @notice Prevents accidental ETH transfers
+     * @dev Users must use depositETH() function
+     */
+    receive() external payable {
+        revert KBV2_UseDepositETH();
     }
 }
