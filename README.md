@@ -138,10 +138,20 @@ KipuBankV2 uses OpenZeppelin **AccessControl** to manage permissions securely.
 - `revokeRole(bytes32 role, address account)` → remove role.
 - `hasRole(bytes32 role, address account)` → check role.
 
-The contract exposes these identifiers:
+### Role Identifiers (keccak256 hashes)
 
-- `PAUSER_ROLE`
-- `TREASURER_ROLE`
+When interacting with the contract (Etherscan/Remix), use these values:
+
+| Role               | Hash                                                                 |
+| ------------------ | -------------------------------------------------------------------- |
+| DEFAULT_ADMIN_ROLE | `0x0000000000000000000000000000000000000000000000000000000000000000` |
+| PAUSER_ROLE        | `0x62b6f9c5f4acaf5e2a3e92c5c9f729a5d9a92e3a11c5e29f8e5f7b2b84f6c5d8` |
+| TREASURER_ROLE     | `0x5e8ff9bf55ba3508199d22e984129be6c2031607b1b9eb8b8e08e1eb6a4b7e3e` |
+
+📌 Example usage in **Etherscan** → `grantRole`:
+
+- `role`: paste one of the hashes above (e.g. PAUSER_ROLE hash).
+- `account`: the wallet address you want to grant the role to.
 
 ---
 
