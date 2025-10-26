@@ -111,6 +111,40 @@ Once verified, interact via **Etherscan UI**:
 
 ---
 
+## 🔑 Roles & Access Control
+
+KipuBankV2 uses OpenZeppelin **AccessControl** to manage permissions securely.
+
+### Roles Defined
+
+- **DEFAULT_ADMIN_ROLE**
+
+  - Assigned to the `admin` address at deployment.
+  - Can grant/revoke roles.
+  - Can update global bank capacity (`setBankCapUSD6`).
+
+- **PAUSER_ROLE**
+
+  - Can call `pause()` and `unpause()`.
+  - Used to freeze operations in emergencies.
+
+- **TREASURER_ROLE**
+  - Can call `rescue(token, amount)` to recover ERC20 or ETH mistakenly sent to the contract.
+  - Does not modify user balances in the ledger.
+
+### Managing Roles
+
+- `grantRole(bytes32 role, address account)` → assign role.
+- `revokeRole(bytes32 role, address account)` → remove role.
+- `hasRole(bytes32 role, address account)` → check role.
+
+The contract exposes these identifiers:
+
+- `PAUSER_ROLE`
+- `TREASURER_ROLE`
+
+---
+
 ## 🧠 Design Decisions & Trade-offs
 
 - ✅ **Unified USD-6 ledger** → Simplifies multi-asset tracking, but depends on Chainlink.
