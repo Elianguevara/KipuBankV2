@@ -1,164 +1,127 @@
-# 🏦 KipuBankV2
+# 🏦 KipuBankV3
 
-## ✨ High-level Improvements
+KipuBankV3 es la evolución del banco unificado en USD construido en el módulo anterior. Mantiene el modelo de seguridad de KipuBankV2 (roles, `Pausable`, `ReentrancyGuard`) y agrega integración con Uniswap V2 para aceptar cualquier token con par directo a USDC. Todos los depósitos terminan denominados en USDC dentro del libro contable interno, lo que permite que los retiros se realicen en USDC o se ruteen a ETH nuevamente.
 
-KipuBankV2 is an evolution of the original **KipuBank** smart contract.  
-The improvements focus on **security**, **multi-token support**, **unified accounting**, and **gas efficiency**, making the contract closer to a production-ready design.
+## ✨ Novedades principales
 
-### 🔒 Security
+| Tema | KipuBankV2 | KipuBankV3 |
+| --- | --- | --- |
+| Tokens soportados | ETH (vía Chainlink) y USDC | ETH, USDC y cualquier ERC20 con par directo en Uniswap V2 |
+| Conversión | Chainlink fija para ETH | Swaps enrutados a USDC usando Uniswap V2 |
+| Retiro en ETH | Conversión con oráculo | Swap USDC → ETH en Uniswap V2 con control de `minOut` |
+| Prevención de reentradas | `ReentrancyGuard` | Igual que V2 |
+| Gobernanza | `AccessControl` (`DEFAULT_ADMIN`, `PAUSER`, `TREASURER`) | Igual que V2 |
+| Límite global (`bankCap`) | Se aplica a depósitos de ETH/USDC | Se aplica antes y después de cada swap para cualquier activo |
 
-- Role-based access control with OpenZeppelin `AccessControl`.
-- `Pausable` to stop deposits/withdrawals in case of emergency.
-- `ReentrancyGuard` to prevent reentrancy attacks.
-- Custom errors instead of `require` strings (more gas efficient).
+### Flujo de depósito
+1. **USDC**: se acredita 1:1 en la contabilidad interna.
+2. **ETH**: se enruta `ETH → WETH → USDC` vía router Uniswap V2.
+3. **Otros ERC20**: deben tener par directo con USDC. Se usa `swapExactTokensForTokens` para convertirlos.
 
-### 💱 Multi-token Support
+En todos los casos el resultado neto en USDC debe respetar `bankCap`. Si el swap produciría un exceso, la transacción revierte.
 
-- ETH deposits converted into USD-6 using Chainlink price feeds.
-- USDC deposits handled 1:1 with USD-6.
-- Withdrawals in ETH or USDC.
+### Flujo de retiro
+- **USDC**: débito directo y transferencia al usuario.
+- **ETH**: el contrato realiza `swapExactTokensForETH` usando el router, con parámetros `minETHOut` y `deadline` provistos por el usuario para controlar slippage.
 
-### 📊 Unified Accounting
+## 🧱 Contratos
 
-- Internal ledger in USD-6 (6 decimals).
-- Nested mapping `s_balances[user][token]`.
-- `address(0)` = ETH, `address(USDC)` = USDC.
+- `src/KipuBankV2.sol`: versión previa, conservada para referencia y compatibilidad.
+- `src/KipuBankV3.sol`: implementación nueva con rutas hacia Uniswap V2.
+- `src/interfaces/IUniswapV2Router02.sol`: interfaz mínima del router utilizada tanto en producción como en los tests.
 
-### 🔗 Oracle Integration
+## ⚙️ Requisitos y configuración
 
-- Chainlink ETH/USD price feed.
-- Staleness & compromised data checks.
+Este repositorio ahora está preparado para Foundry.
 
-### ⚡ Gas Efficiency
+```bash
+# Instalar foundry (si no lo tienes)
+curl -L https://foundry.paradigm.xyz | bash
+foundryup
 
-- Reduced storage reads/writes.
-- Use of `immutable` and `constant`.
-- Strict **Checks-Effects-Interactions** pattern.
+# Instalar dependencias necesarias
+forge install OpenZeppelin/openzeppelin-contracts@v5.0.2
+forge install smartcontractkit/chainlink-brownie-contracts@1.2.0
+```
 
----
+El archivo `foundry.toml` define:
+- `solc_version = 0.8.26`
+- Optimizador activado (200 runs)
+- Remappings hacia las librerías anteriores
 
-## 🚀 Deployment Instructions
+## 🚀 Despliegue (Foundry)
 
-### 📋 Requirements
+```bash
+# Ejemplo Sepolia
+forge create src/KipuBankV3.sol:KipuBankV3 \
+  --rpc-url $SEPOLIA_RPC \
+  --private-key $PRIVATE_KEY \
+  --constructor-args \
+      <admin> \
+      <usdc_address> \
+      <uniswap_router> \
+      <bank_cap_usd6> \
+      <withdrawal_limit_usd6>
+```
 
-- **Remix IDE** or Hardhat/Foundry.
-- **MetaMask** connected to **Sepolia Testnet**.
-- Testnet ETH (from [Sepolia faucet](https://sepoliafaucet.com/)).
+Parámetros clave:
+- `admin`: EOA que recibe los roles `DEFAULT_ADMIN_ROLE`, `PAUSER_ROLE` y `TREASURER_ROLE`.
+- `usdc_address`: token USDC de la red objetivo (6 decimales).
+- `uniswap_router`: dirección del router Uniswap V2 compatible.
+- `bank_cap_usd6`: capacidad global en unidades de 6 decimales.
+- `withdrawal_limit_usd6`: límite por retiro (<= `bankCap`).
 
-### 🛠️ Steps (Remix + MetaMask)
+## 🕹️ Interacción
 
-1. Open [Remix IDE](https://remix.ethereum.org).
-2. Load `KipuBankV2.sol` into workspace.
-3. Compile:
-   - Solidity version **0.8.26**
-   - Optimization **200 runs**
-4. Deploy:
-   - Env: **Injected Provider - MetaMask**
-   - Contract: `KipuBankV2`
-   - Constructor args (example):
+| Función | Descripción | Notas |
+| --- | --- | --- |
+| `depositUSDC(uint256 amount)` | Deposita USDC directo | Requiere `approve` previo |
+| `depositETH(uint256 minUSDCOut, uint256 deadline)` | Envía ETH y lo convierte a USDC | `minUSDCOut` controla el slippage, `deadline` debe ser futuro |
+| `depositToken(address token, uint256 amount, uint256 minUSDCOut, uint256 deadline)` | Deposita cualquier ERC20 con par directo a USDC | El contrato transfiere el token, aprueba el router y hace el swap |
+| `withdrawUSDC(uint256 usd6Amount)` | Retira USDC 1:1 | Respeta `WITHDRAWAL_THRESHOLD_USD6` |
+| `withdrawETH(uint256 usd6Amount, uint256 minETHOut, uint256 deadline)` | Swap USDC → ETH y envío | Slippage controlado por el usuario |
+| `previewDeposit(address token, uint256 amount)` | Llama a `getAmountsOut` del router | Útil para frontends |
+| `previewWithdrawETH(uint256 usd6Amount)` | Calcula ETH estimado vía router | --- |
+| `pause()` / `unpause()` | Control de emergencias | Solo `PAUSER_ROLE` |
+| `setBankCapUSD6(uint256 newCap)` | Ajusta el límite global | Solo admin |
+| `rescue(address token, uint256 amount)` | Recupera fondos extra | Solo `TREASURER_ROLE` |
 
-| Param                     | Value                                        |
-| ------------------------- | -------------------------------------------- |
-| `admin`                   | `0xYourAddress`                              |
-| `usdc`                    | `0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238` |
-| `ethUsdFeed`              | `0x694AA1769357215DE4FAC081bf1f309aDC325306` |
-| `bankCapUSD6`             | `1000000000000` (1M USD-6)                   |
-| `withdrawalThresholdUSD6` | `10000000000` (10k USD-6)                    |
+## 🧪 Tests y cobertura
 
-5. Confirm in MetaMask.
-6. Verify contract on **Sepolia Etherscan**:
-   - Compiler: `0.8.26`, opt: 200 runs.
-   - Paste source code.
-   - Provide ABI-encoded constructor args.
+Los tests viven en `test/` y utilizan mocks livianos para el router, USDC y tokens arbitrarios.
 
----
+```bash
+forge test
+forge coverage
+```
 
-## 🎮 Interaction Guide
+La suite cubre flujos de depósito para ETH/USDC/ERC20, retiros con swaps, enforcement de `bankCap`, pausas y rutas de error. La meta es superar 50 % de cobertura; verifica el reporte con `forge coverage`.
 
-Once verified, interact via **Etherscan UI**:  
-👉 [Sepolia Etherscan Example](https://sepolia.etherscan.io)
+> ℹ️ Los tests dependen de Foundry. Si ejecutas en un entorno sin `forge`, instala la herramienta o usa GitHub Codespaces/Foundry Docker.
 
-### 📖 Read-only (Free)
+## 🔐 Análisis de amenazas resumido
 
-- `getBalanceUSD6(user, token)` → User balance.
-- `getTotalBalanceUSD6(user)` → User total balance.
-- `getETHPrice()` → ETH/USD price.
-- `previewETHToUSD6(weiAmount)` → Simulate ETH → USD-6.
-- `previewUSD6ToETH(usd6Amount)` → Simulate USD-6 → ETH.
+| Riesgo | Mitigación | Estado |
+| --- | --- | --- |
+| **Slippage / front-running** | Usuarios fijan `minUSDCOut`/`minETHOut` y `deadline` | Considerar integración con oráculos o permit pools con slippage automático en futuras versiones |
+| **Liquidez insuficiente en router** | Tests usan mocks, en producción depende del pool | Supervisar liquidez del par; fallback a Curve/otros routers si se desea robustez |
+| **bankCap incumplido** | Se valida con cotización previa y post-swap (revert) | Añadir buffer dinámico y monitoreo externo |
+| **Reentradas** | `ReentrancyGuard` + patrón CEI | Mantener auditorías al integrar routers externos |
+| **Rug pull de tokens depositados** | Solo se aceptan tokens con par directo a USDC | Agregar listas blancas/negra gestionadas por admin |
 
-### ✍️ State-changing (Gas required)
+Pasos adicionales sugeridos para madurez:
+- Monitorizar precios off-chain y suspender depósitos si la desviación contra oráculos supera cierto umbral.
+- Integrar múltiples routers (Uniswap/Sushiswap) para mejor ruta y redundancia.
+- Añadir límites por usuario y mecanismos de riesgo (p. ej., scoring de tokens).
+- Automatizar pruebas de integración en redes de prueba reales.
 
-1. **Deposit ETH**
+## 📚 Recursos para auditores y frontends
 
-   - `depositETH()` + enter ETH value.
+- Los eventos `KBV3_Deposit` y `KBV3_Withdrawal` emiten token de entrada/salida, montos y USDC acreditado/debitado.
+- `getBalanceUSD6(user, address(USDC))` retorna el saldo neto en el banco.
+- `previewDeposit` y `previewWithdrawETH` sirven para mostrar estimaciones en UI.
+- Roles definidos: `DEFAULT_ADMIN_ROLE`, `PAUSER_ROLE`, `TREASURER_ROLE` (valores = `keccak256("…")`).
 
-2. **Deposit USDC**
+## 📄 Licencia
 
-   - `approve` USDC first.
-   - Then call `depositUSDC(amount)`.
-
-3. **Withdraw ETH**
-
-   - `withdrawETH(usd6Amount)`.
-
-4. **Withdraw USDC**
-
-   - `withdrawUSDC(usd6Amount)`.
-
-5. **Admin Controls**
-   - `pause()` / `unpause()` → Emergency stop.
-   - `rescue(token, amount)` → Recover extra funds.
-
----
-
-## 🔑 Roles & Access Control
-
-KipuBankV2 uses OpenZeppelin **AccessControl** to manage permissions securely.
-
-### Roles Defined
-
-- **DEFAULT_ADMIN_ROLE**
-
-  - Assigned to the `admin` address at deployment.
-  - Can grant/revoke roles.
-  - Can update global bank capacity (`setBankCapUSD6`).
-
-- **PAUSER_ROLE**
-
-  - Can call `pause()` and `unpause()`.
-  - Used to freeze operations in emergencies.
-
-- **TREASURER_ROLE**
-  - Can call `rescue(token, amount)` to recover ERC20 or ETH mistakenly sent to the contract.
-  - Does not modify user balances in the ledger.
-
-### Managing Roles
-
-- `grantRole(bytes32 role, address account)` → assign role.
-- `revokeRole(bytes32 role, address account)` → remove role.
-- `hasRole(bytes32 role, address account)` → check role.
-
-### Role Identifiers (keccak256 hashes)
-
-When interacting with the contract (Etherscan/Remix), use these values:
-
-| Role               | Hash                                                                 |
-| ------------------ | -------------------------------------------------------------------- |
-| DEFAULT_ADMIN_ROLE | `0x0000000000000000000000000000000000000000000000000000000000000000` |
-| PAUSER_ROLE        | `0x62b6f9c5f4acaf5e2a3e92c5c9f729a5d9a92e3a11c5e29f8e5f7b2b84f6c5d8` |
-| TREASURER_ROLE     | `0x5e8ff9bf55ba3508199d22e984129be6c2031607b1b9eb8b8e08e1eb6a4b7e3e` |
-
-📌 Example usage in **Etherscan** → `grantRole`:
-
-- `role`: paste one of the hashes above (e.g. PAUSER_ROLE hash).
-- `account`: the wallet address you want to grant the role to.
-
----
-
-## 🧠 Design Decisions & Trade-offs
-
-- ✅ **Unified USD-6 ledger** → Simplifies multi-asset tracking, but depends on Chainlink.
-- ✅ **Role-based access** → Secure & modular, but requires proper setup.
-- ✅ **Chainlink oracle** → Reliable pricing, but external dependency.
-- ✅ **Gas optimization** → Cheaper execution, but slightly harder readability.
-- ✅ **Custom errors** → Gas-efficient, but less verbose for end-users.
+MIT.

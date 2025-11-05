@@ -1,0 +1,17 @@
+[profile.default]
+src = "src"
+out = "out"
+test = "test"
+libs = ["lib"]
+optimizer = true
+optimizer_runs = 200
+solc_version = "0.8.26"
+remappings = [
+    "@openzeppelin/=lib/openzeppelin-contracts/",
+    "@chainlink/=lib/chainlink-brownie-contracts/"
+]
+
+[fmt]
+line_length = 120
+multiline_func_header = "params_first"
+wrap_comments = true
